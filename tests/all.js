@@ -8,9 +8,6 @@ var path = require('path');
 var url = require('url');
 var util = require('util');
 
-var assert = require('assert-plus');
-var mkdirp = require('mkdirp');
-var rimraf = require('rimraf');
 var test = require('tape');
 
 var lib = require('./lib');
@@ -33,11 +30,6 @@ var dir = path.join(__dirname, 'tmp');
  * wrapper for making web requests to the caching server
  */
 function cacheRequest(p, opts, cb) {
-    assert.string(p, 'p');
-    assert.object(opts, 'opts');
-    assert.string(opts.method, 'opts.method');
-    assert.func(cb, 'cb');
-
     var uri = f('%s%s', cachingServerURL, p);
 
     var o = url.parse(uri);
@@ -78,8 +70,9 @@ test('start cachingServer', function (t) {
         backendUrl: backendServerURL
     };
 
-    mkdirp.sync(dir);
-    rimraf.sync(dir + '/*');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.mkdirSync(dir, { recursive: true });
     t.pass(f('tmp dir "%s" cleared', dir));
 
     cachingServer = new FsCachingServer(opts);
@@ -251,7 +244,7 @@ test('statusCodes with proxy', function (t) {
             t.ok(webData, 'webData should have data from server');
 
             cachingServer.onIdle(function () {
-                // ensure the file exists with the corect data
+                // ensure the file exists with the correct data
                 var file = path.join(dir, uri);
                 var fileData = fs.readFileSync(file, 'utf-8');
                 t.equal(webData, fileData, 'file data in sync with web data');
