@@ -4,14 +4,17 @@ import * as http from 'node:http';
 import * as https from 'node:https';
 import * as path from 'node:path';
 import { PassThrough } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
 import * as util from 'node:util';
 import { randomUUID } from 'node:crypto';
-import accesslog = require('access-log');
 import * as mime from 'mime-types';
+import pLimit = require('p-limit');
+import CachePolicy = require('http-cache-semantics');
 
 const NO_PROXY_HEADERS = ['date', 'server', 'host'];
 const CACHE_METHODS = ['GET', 'HEAD'];
 const DEFAULT_REGEX = /\.(png|jpg|jpeg|css|html|js|tar|tgz|tar\.gz)$/;
+const DEFAULT_MAX_CONCURRENCY = 10;
 
 type LogFn = (format: string, ...args: unknown[]) => void;
 
@@ -23,6 +26,7 @@ export interface FsCachingServerOptions {
   regex?: RegExp;
   noProxyHeaders?: string[];
   cacheMethods?: string[];
+  maxConcurrency?: number;
 }
 
 interface QueuedRequest {
@@ -40,8 +44,10 @@ export class FsCachingServer extends EventEmitter {
   readonly noProxyHeaders: string[];
   readonly cacheMethods: string[];
   readonly backendHttps: boolean;
+  readonly maxConcurrency: number;
 
   private server: http.Server | null = null;
+  private readonly _limit: pLimit.Limit;
   idle = true;
   private inProgress: Record<string, QueuedRequest[]> = {};
 
@@ -55,6 +61,8 @@ export class FsCachingServer extends EventEmitter {
     this.noProxyHeaders = opts.noProxyHeaders ?? [...NO_PROXY_HEADERS];
     this.cacheMethods = opts.cacheMethods ?? [...CACHE_METHODS];
     this.backendHttps = this.backendUrl.startsWith('https:');
+    this.maxConcurrency = opts.maxConcurrency ?? DEFAULT_MAX_CONCURRENCY;
+    this._limit = pLimit(this.maxConcurrency);
   }
 
   start(): void {
@@ -69,6 +77,7 @@ export class FsCachingServer extends EventEmitter {
       this._log('proxying requests to %s', this.backendUrl);
       this._log('caching matches of %s', this.regex);
       this._log('caching to %s', this.cacheDir);
+      this._log('max concurrent backend fetches: %d', this.maxConcurrency);
       this.emit('start');
     });
   }
@@ -98,7 +107,7 @@ export class FsCachingServer extends EventEmitter {
       this._log('[%s] %s', id, util.format(format, ...args));
     };
 
-    accesslog(req, res, undefined, (s) => {
+    logAccess(req, res, (s) => {
       this.emit('access-log', s);
       log(s);
     });
@@ -214,7 +223,7 @@ export class FsCachingServer extends EventEmitter {
         return;
       }
 
-      if (Object.prototype.hasOwnProperty.call(this.inProgress, file)) {
+      if (Object.hasOwn(this.inProgress, file)) {
         log('%s download in progress - response queued', file);
         this.inProgress[file].push({ id, req, res });
         return;
@@ -236,69 +245,90 @@ export class FsCachingServer extends EventEmitter {
 
       log('proxying %s to %s', req.method, uristring);
 
-      const oreq = this._makeRequest(
-        {
-          hostname: parsedBackend.hostname,
-          port: parsedBackend.port || undefined,
-          path: parsedBackend.pathname + parsedBackend.search,
-          method: req.method ?? 'GET',
-          headers,
-        },
-        (ores) => {
-          res.statusCode = ores.statusCode ?? 500;
-          copyHeaders(ores.headers, res, this.noProxyHeaders);
+      void this._limit(
+        () =>
+          new Promise<void>((resolve) => {
+            const oreq = this._makeRequest(
+              {
+                hostname: parsedBackend.hostname,
+                port: parsedBackend.port || undefined,
+                path: parsedBackend.pathname + parsedBackend.search,
+                method: req.method ?? 'GET',
+                headers,
+              },
+              (ores) => {
+                // Free the concurrency slot as soon as backend responds with headers.
+                resolve();
 
-          if (res.statusCode < 200 || res.statusCode >= 300) {
-            log(
-              'statusCode %d from backend not in 200 range - proxying back to caller',
-              res.statusCode,
-            );
-            finish({ statusCode: res.statusCode });
-            res.end();
-            return;
-          }
+                res.statusCode = ores.statusCode ?? 500;
+                copyHeaders(ores.headers, res, this.noProxyHeaders);
 
-          fs.mkdir(path.dirname(file), { recursive: true }, () => {
-            const tmp = `${file}.in-progress`;
-            log('saving local file to %s', tmp);
-            const ws = fs.createWriteStream(tmp);
-
-            ws.once('finish', () => {
-              fs.rename(tmp, file, (renameErr) => {
-                if (renameErr) {
-                  log('failed to rename %s to %s', tmp, file);
-                  finish({ statusCode: 500 });
+                if (res.statusCode < 200 || res.statusCode >= 300) {
+                  log(
+                    'statusCode %d from backend not in 200 range - proxying back to caller',
+                    res.statusCode,
+                  );
+                  finish({ statusCode: res.statusCode });
+                  res.end();
                   return;
                 }
-                log('renamed %s to %s', tmp, file);
-                finish({ ores });
-              });
-            });
 
-            ws.once('error', (e) => {
-              log('failed to save local file %s', e.message);
-              ores.unpipe(ws);
+                const policy = new CachePolicy(
+                  { method: req.method ?? 'GET', url: parsedUrl.pathname, headers: req.headers },
+                  { status: ores.statusCode ?? 200, headers: ores.headers },
+                );
+
+                if (!policy.storable()) {
+                  log('backend response not cacheable - proxying without caching');
+                  finish({ statusCode: res.statusCode });
+                  ores.pipe(res);
+                  return;
+                }
+
+                fs.mkdir(path.dirname(file), { recursive: true }, () => {
+                  const tmp = `${file}.in-progress`;
+                  log('saving local file to %s', tmp);
+                  const ws = fs.createWriteStream(tmp);
+
+                  ws.once('finish', () => {
+                    fs.rename(tmp, file, (renameErr) => {
+                      if (renameErr) {
+                        log('failed to rename %s to %s', tmp, file);
+                        finish({ statusCode: 500 });
+                        return;
+                      }
+                      log('renamed %s to %s', tmp, file);
+                      finish({ ores });
+                    });
+                  });
+
+                  ws.once('error', (e) => {
+                    log('failed to save local file %s', e.message);
+                    ores.unpipe(ws);
+                    finish({ statusCode: 500 });
+                  });
+
+                  const ores_ws = new PassThrough();
+                  const ores_res = new PassThrough();
+                  ores.pipe(ores_ws);
+                  ores.pipe(ores_res);
+                  ores_ws.pipe(ws);
+                  ores_res.pipe(res);
+                });
+              },
+            );
+
+            oreq.on('error', (e) => {
+              resolve();
+              log('error with proxy request %s', e.message);
+              res.statusCode = 500;
+              res.end();
               finish({ statusCode: 500 });
             });
 
-            const ores_ws = new PassThrough();
-            const ores_res = new PassThrough();
-            ores.pipe(ores_ws);
-            ores.pipe(ores_res);
-            ores_ws.pipe(ws);
-            ores_res.pipe(res);
-          });
-        },
+            oreq.end();
+          }),
       );
-
-      oreq.on('error', (e) => {
-        log('error with proxy request %s', e.message);
-        res.statusCode = 500;
-        res.end();
-        finish({ statusCode: 500 });
-      });
-
-      oreq.end();
     });
   }
 
@@ -312,6 +342,23 @@ export class FsCachingServer extends EventEmitter {
   ): http.ClientRequest {
     return this.backendHttps ? https.request(opts, cb) : http.request(opts, cb);
   }
+}
+
+function logAccess(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  cb: (line: string) => void,
+): void {
+  res.once('finish', () => {
+    const remote = req.socket?.remoteAddress ?? '-';
+    const ts = new Date().toUTCString();
+    const method = req.method ?? '-';
+    const url = req.url ?? '-';
+    const proto = `HTTP/${req.httpVersion}`;
+    const status = res.statusCode;
+    const size = res.getHeader('content-length') ?? '-';
+    cb(`${remote} - - [${ts}] "${method} ${url} ${proto}" ${status} ${size}`);
+  });
 }
 
 function buildProxyHeaders(
@@ -367,12 +414,10 @@ function streamFile(
   }
 
   const rs = fs.createReadStream(file);
-  rs.pipe(res);
-  rs.once('error', (e: NodeJS.ErrnoException) => {
-    res.statusCode = e.code === 'ENOENT' ? 404 : 500;
-    res.end();
-  });
-  res.once('close', () => {
-    rs.destroy();
+  pipeline(rs, res).catch((err: NodeJS.ErrnoException) => {
+    if (!res.headersSent) {
+      res.statusCode = err.code === 'ENOENT' ? 404 : 500;
+      res.end();
+    }
   });
 }

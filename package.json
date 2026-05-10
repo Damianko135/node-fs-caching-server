@@ -10,7 +10,8 @@
   "scripts": {
     "build": "tsgo",
     "dev": "tsgo --watch",
-    "clean": "rimraf dist",
+    "compile": "bun build --compile --minify src/cli.ts --outfile fs-caching-server",
+    "clean": "rimraf dist fs-caching-server fs-caching-server.exe",
     "test": "pnpm run build && tape tests/*.js",
     "prepublishOnly": "pnpm run build"
   },
@@ -35,10 +36,12 @@
     "node": ">=18.3.0"
   },
   "dependencies": {
-    "access-log": "^0.4.1",
-    "mime-types": "^2.1.35"
+    "http-cache-semantics": "^4.2.0",
+    "mime-types": "^2.1.35",
+    "p-limit": "^3.1.0"
   },
   "devDependencies": {
+    "@types/http-cache-semantics": "^4.2.0",
     "@types/mime-types": "^2.1.4",
     "@types/node": "^22.0.0",
     "@typescript/native-preview": "7.0.0-dev.20260421.2",

@@ -8,13 +8,14 @@ const pkg = require('../package.json') as { version: string };
 const DEFAULT_HOST = process.env['FS_CACHE_HOST'] ?? '0.0.0.0';
 const DEFAULT_PORT = process.env['FS_CACHE_PORT'] ?? '8080';
 const DEFAULT_CACHE_DIR = process.env['FS_CACHE_DIR'] ?? process.cwd();
+const DEFAULT_DEBUG = Boolean(process.env['FS_CACHE_DEBUG']);
 
 const USAGE = `
 usage: fs-caching-server [options]
 
 options
   -c, --cache-dir <dir>     [env FS_CACHE_DIR] directory for caching, defaults to CWD
-  -d, --debug               enable debug logging to stderr
+  -d, --debug               [env FS_CACHE_DEBUG] enable debug logging to stderr
   -H, --host <host>         [env FS_CACHE_HOST] host to listen on, defaults to ${DEFAULT_HOST}
   -h, --help                print this message and exit
   -p, --port <port>         [env FS_CACHE_PORT] port to listen on, defaults to ${DEFAULT_PORT}
@@ -28,7 +29,7 @@ function main(): void {
     args: process.argv.slice(2),
     options: {
       'cache-dir': { type: 'string', short: 'c', default: DEFAULT_CACHE_DIR },
-      debug: { type: 'boolean', short: 'd', default: false },
+      debug: { type: 'boolean', short: 'd', default: DEFAULT_DEBUG },
       host: { type: 'string', short: 'H', default: DEFAULT_HOST },
       help: { type: 'boolean', short: 'h', default: false },
       port: { type: 'string', short: 'p', default: DEFAULT_PORT },

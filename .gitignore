@@ -3,3 +3,5 @@ dist
 cache
 tests/config.json
 tests/tmp
+fs-caching-server
+fs-caching-server.exe

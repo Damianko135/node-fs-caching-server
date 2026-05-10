@@ -1,220 +1,169 @@
-fs-caching-server
-=================
+# fs-caching-server
 
-A caching HTTP server/proxy that stores data on the local filesystem
+A caching HTTP proxy that stores responses on the local filesystem. Requests matching a configurable regex are cached on first fetch and served from disk on subsequent requests — bypassing the backend entirely.
 
-Installation
-------------
+## How it works
 
-    [sudo] npm install [-g] fs-caching-server
+- **Cache miss** — request is proxied to the backend, response is streamed to the client and written to disk simultaneously.
+- **Cache hit** — file is served directly from disk with `ETag` / `If-None-Match` support (304 responses).
+- **Concurrent misses for the same file** — only one backend request is made; other requests queue and are served from disk once the download completes.
+- **Non-cacheable responses** — responses with `Cache-Control: no-store` or similar directives are proxied through without being written to disk.
 
-`v1.0.0` Release Notes
-----------------------
+## Getting started
 
-`v1.0.0` adds the following changes as well as bug fixes.
+```sh
+git clone https://github.com/Damianko135/node-fs-caching-server.git
+cd node-fs-caching-server
+pnpm install
+```
 
-- Fixes HEAD before GET caching - old behavior would cache 0-byte files
-- Handles redirects (or more accurately, doesn't handle - just proxies them)
-- Can retrieve from an HTTPS backend URL
-- Tests! there were none before - now a lot of tests have been added to ensure functionality
-- Can be used as a module (this added mostly for testing)
-- Cache dir can be specified as an argument/env variable - CWD not required anymore
-- Access logs now contain debug UUID if debug is specified
+## Running
 
-CLI
----
+### Option 1 — Node.js (build once, run anywhere with Node)
 
-### Description
+```sh
+pnpm run build        # compiles TypeScript → dist/
+node dist/cli.js -U https://registry.npmjs.org -c ./cache
+```
 
-The `fs-caching-server` program installed can be used to spin up an HTTP server
-that acts a proxy to any other HTTP(s) server - with the added ability to
-cache GET and HEAD requests that match a given regex.
+You only need to rebuild when the source changes. The `dist/` directory is the only thing you need to ship (alongside `node_modules`).
 
-### Example
+### Option 2 — Bun (no build step, run TypeScript directly)
 
-This will create a caching proxy that fronts Joyent's pkgsrc servers
+If you have [Bun](https://bun.sh) installed you can skip the build entirely:
 
-    $ mkdir cache
-    $ fs-caching-server -c cache/ -d -U https://pkgsrc.joyent.com
-    listening on http://0.0.0.0:8080
-    proxying requests to https://pkgsrc.joyent.com
-    caching matches of /\.(png|jpg|jpeg|css|html|js|tar|tgz|tar\.gz)$/
-    caching to /home/dave/dev/fs-caching-server/cache
+```sh
+bun src/cli.ts -U https://registry.npmjs.org -c ./cache
+```
 
-`-d` enables debug output which can be used to determine if a file was a cache
-hit, cache miss, or skipped the cache completely.  For example, we can request
-a file twice to see that it will be proxied and downloaded the first time, and
-the second time it will just be streamed from the local cache.
+Bun runs TypeScript natively so no compilation is needed.
 
-    [58b93965-b7de-4669-9cb1-aff39e16a4fb] INCOMING REQUEST - GET /packages/SmartOS/2014Q4/x86_64/All/watch-3.2.6nb1.tgz
-    [58b93965-b7de-4669-9cb1-aff39e16a4fb] proxying GET to http://pkgsrc.joyent.com/packages/SmartOS/2014Q4/x86_64/All/watch-3.2.6nb1.tgz
-    [58b93965-b7de-4669-9cb1-aff39e16a4fb] saving local file to ./packages/SmartOS/2014Q4/x86_64/All/watch-3.2.6nb1.tgz.in-progress
-    10.0.1.35 - - [16/May/2015:20:31:39 -0400] "GET /packages/SmartOS/2014Q4/x86_64/All/watch-3.2.6nb1.tgz HTTP/1.1" 200 12432 "-" "libfetch/2.0"
-    [58b93965-b7de-4669-9cb1-aff39e16a4fb] renamed ./packages/SmartOS/2014Q4/x86_64/All/watch-3.2.6nb1.tgz.in-progress to ./packages/SmartOS/2014Q4/x86_64/All/watch-3.2.6nb1.tgz
-    ...
-    [ff8a1519-597f-4f9a-a999-bd05677896c2] INCOMING REQUEST - GET /packages/SmartOS/2014Q4/x86_64/All/watch-3.2.6nb1.tgz
-    [ff8a1519-597f-4f9a-a999-bd05677896c2] ./packages/SmartOS/2014Q4/x86_64/All/watch-3.2.6nb1.tgz is a file (cached) - streaming to client
-    10.0.1.35 - - [16/May/2015:20:32:48 -0400] "GET /packages/SmartOS/2014Q4/x86_64/All/watch-3.2.6nb1.tgz HTTP/1.1" 200 12432 "-" "curl/7.39.0"
+### Option 3 — Standalone binary (no Node or Bun required on target)
 
-The lines that begin with `[<uuid>]` are only printed when debug (`-d`) is
-enabled - each UUID represents a unique incoming request.  The first request
-shows the file was proxied to pkgsrc.joyent.com and streamed to both the client
-and the local filesystem.  The second request shows the file was already
-present so it was streamed to the client without ever reaching out to
-pkgsrc.joyent.com.
+```sh
+pnpm run compile      # produces fs-caching-server / fs-caching-server.exe
+```
 
-### Usage
+The output is a single self-contained executable with the Bun runtime embedded. Copy it to any machine and run it — no runtime dependencies needed.
 
-    $ fs-caching-server -h
-    usage: fs-caching-server [options]
+```sh
+./fs-caching-server -U https://registry.npmjs.org -c ./cache
+```
 
-    options
-      -c, --cache-dir <dir>     [env FS_CACHE_DIR] directory to use for caching data, defaults to CWD
-      -d, --debug               enable debug logging to stderr
-      -H, --host <host>         [env FS_CACHE_HOST] the host on which to listen, defaults to 0.0.0.0
-      -h, --help                print this message and exit
-      -p, --port <port>         [env FS_CACHE_PORT] the port on which to listen, defaults to 8080
-      -r, --regex <regex>       [env FS_CACHE_REGEX] regex to match to cache files, defaults to /\.(png|jpg|jpeg|css|html|js|tar|tgz|tar\.gz)$/
-      -U, --url <url>           [env FS_CACHE_URL] URL to proxy to
-      -u, --updates             check npm for available updates
-      -v, --version             print the version number and exit
+## CLI
 
-Module
-------
+```
+usage: fs-caching-server [options]
 
-### Description
+options
+  -c, --cache-dir <dir>     [env FS_CACHE_DIR]   directory for caching, defaults to CWD
+  -d, --debug               [env FS_CACHE_DEBUG] enable debug logging to stderr
+  -H, --host <host>         [env FS_CACHE_HOST]  host to listen on, defaults to 0.0.0.0
+  -h, --help                print this message and exit
+  -p, --port <port>         [env FS_CACHE_PORT]  port to listen on, defaults to 8080
+  -r, --regex <regex>       [env FS_CACHE_REGEX] regex to match for caching
+  -U, --url <url>           [env FS_CACHE_URL]   URL to proxy to (required)
+  -v, --version             print the version number and exit
+```
 
-This module can also be used as a JavaScript module.
+All flags can be set via environment variables. `FS_CACHE_DEBUG` enables debug mode when set to any non-empty value.
 
 ### Example
 
-``` js
-var FsCachingServer = require('fs-caching-server').FsCachingServer;
+```sh
+mkdir cache
+fs-caching-server -U https://pkgsrc.joyent.com -c cache/ -d
+```
 
-// proxy to Joyent's pkgsrc
-var opts = {
-    cacheDir: '/home/dave/cache-dir',
-    host: '0.0.0.0',
-    port: 8080,
-    backendUrl: 'https://pkgsrc.joyent.com'
-};
+```
+listening on http://0.0.0.0:8080
+proxying requests to https://pkgsrc.joyent.com
+caching matches of /\.(png|jpg|jpeg|css|html|js|tar|tgz|tar\.gz)$/
+caching to /home/user/cache
+max concurrent backend fetches: 10
+```
 
-var cachingServer = new FsCachingServer(opts);
+With `-d` debug output shows whether each request was a cache hit, miss, or skipped:
 
-cachingServer.once('start', function () {
-    console.log('server started');
+```
+[a1b2c3d4] INCOMING REQUEST - GET /packages/file.tgz
+[a1b2c3d4] proxying GET to https://pkgsrc.joyent.com/packages/file.tgz
+[a1b2c3d4] saving local file to ./cache/packages/file.tgz.in-progress
+[a1b2c3d4] renamed .../file.tgz.in-progress to .../file.tgz
+...
+[e5f6a7b8] INCOMING REQUEST - GET /packages/file.tgz
+[e5f6a7b8] .../file.tgz is a file (cached) - streaming to client
+```
+
+## Module API
+
+The server can be used as a TypeScript/JavaScript module:
+
+```typescript
+import { FsCachingServer } from 'fs-caching-server';
+
+const server = new FsCachingServer({
+  host: '0.0.0.0',
+  port: 8080,
+  backendUrl: 'https://pkgsrc.joyent.com',
+  cacheDir: '/tmp/cache',
 });
 
-if (process.env.NODE_DEBUG) {
-    // debug messages go to stderr
-    cachingServer.on('log', console.error);
-}
+server.on('access-log', console.log);
+server.on('log', console.error); // debug logs
 
-// access log messages to stdout
-cachingServer.on('access-log', console.log);
-
-cachingServer.start();
+server.start();
 ```
 
-### Usage
+### Options
 
-``` js
-/*
- * FsCachingServer
- *
- * Create an instance of an FS Caching Server
- *
- * Aurguments
- *  opts                  Object
- *    opts.host           String (Required) Host to bind to. ex: '0.0.0.0',
- *                                          '127.0.0.1', etc.
- *    opts.port           Number (Required) Port to bind to. ex: 80, 8080, etc.
- *    opts.backendUrl     String (Required) URL of the backend to proxy
- *                                          requests to. ex:
- *                                          'http://1.2.3.4:5678'
- *    opts.cacheDir       String (Required) Directory for the cached items. ex:
- *                                          '/tmp/fs-caching-server'
- *    opts.regex          RegExp (Optional) Regex to match to enable caching,
- *                                          defaults to REGEX above.
- *    opts.noProxyHeaders Array  (Optional) An array of headers to not proxy to
- *                                          the backend, default is [date,
- *                                          server, host].
- *    opts.cacheMethods   Array  (Optional) An array of methods to proxy,
- *                                          default is [GET, HEAD].
- *
- * Methods
- *
- * .start()
- *  - Start the server.
- *
- * .stop()
- *  - Stop the server.
- *
- * .onIdle(cb)
- *  - Call the callback when the caching server is "idle" (see events below).
- *
- * Events
- *
- * 'start'
- *  - Called when the listener is started.
- *
- * 'stop'
- *  - Called when the listener is stopped.
- *
- * 'access-log'
- *  - Called per-request with a CLF-formatted apache log style string.
- *
- * 'log'
- *  - Called with debug logs from the server - useful for debugging.
- *
- * 'idle'
- *  - Called when the server is idle.  "idle" does not mean there are not
- *  pending web requests, but instead means there are no pending filesystem
- *  actions remaining.  This is useful for writing automated tests.
- */
- ```
+| Option | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `host` | `string` | yes | — | Host to bind to |
+| `port` | `number` | yes | — | Port to bind to |
+| `backendUrl` | `string` | yes | — | Backend URL to proxy to |
+| `cacheDir` | `string` | yes | — | Directory for cached files |
+| `regex` | `RegExp` | no | `\.(png\|jpg\|jpeg\|css\|html\|js\|tar\|tgz\|tar\.gz)$` | Which paths to cache |
+| `noProxyHeaders` | `string[]` | no | `['date', 'server', 'host']` | Headers stripped before proxying |
+| `cacheMethods` | `string[]` | no | `['GET', 'HEAD']` | HTTP methods eligible for caching |
+| `maxConcurrency` | `number` | no | `10` | Max simultaneous backend fetches |
 
-Testing
--------
+### Methods
 
-```
-$ NODE_DEBUG=1 npm test
+- **`.start()`** — start the server.
+- **`.stop()`** — stop the server.
+- **`.onIdle(cb)`** — call `cb` when there are no pending filesystem writes. Useful for tests.
 
+### Events
 
-> fs-caching-server@0.0.3 test /home/dave/dev/node-fs-caching-server
-> ./node_modules/tape/bin/tape tests/*.js
+| Event | Description |
+|---|---|
+| `start` | Server is listening |
+| `stop` | Server has closed |
+| `access-log` | Per-request Apache CLF-formatted log line |
+| `log` | Internal debug log messages |
+| `idle` | No pending filesystem writes remain |
 
-TAP version 13
-# start cachingServer
-ok 1 tmp dir "/home/dave/dev/node-fs-caching-server/tests/tmp" cleared
-starting server
-listening on http://127.0.0.1:8081
-proxying requests to http://127.0.0.1:8080
-caching matches of /\.(png|jpg|jpeg|css|html|js|tar|tgz|tar\.gz)$/
-caching to /home/dave/dev/node-fs-caching-server/tests/tmp
-ok 2 cachingServer started
-# start backendServer
-ok 3 backendServer started on http://127.0.0.1:8080
-# simple cached request
-[63e44996-ac28-4a0f-b306-61aeeb88b53c] INCOMING REQUEST - GET /hello.png
-[63e44996-ac28-4a0f-b306-61aeeb88b53c] proxying GET to http://127.0.0.1:8080/hello.png
-[63e44996-ac28-4a0f-b306-61aeeb88b53c] saving local file to /home/dave/dev/node-fs-caching-server/tests/tmp/hello.png.in-progress
-[63e44996-ac28-4a0f-b306-61aeeb88b53c] 127.0.0.1 - - [13/Mar/2021:20:58:52 -0500] "GET /hello.png HTTP/1.1" 200 48 "-" "-"
-...
-...
-...
-ok 50 backendServer closed
-# stop cachingServer
-ok 51 cachingServer stopped
+## SMF (Solaris / illumos)
 
-1..51
-# tests 51
-# pass  51
+An SMF service manifest is provided in `smf/manifest.xml` for running the server as a managed service on Solaris, illumos, or SmartOS.
 
-# ok
+```sh
+svccfg import smf/manifest.xml
+svcadm enable fs-caching-server
 ```
 
-License
--------
+Configure via the environment variables in the manifest (`FS_CACHE_URL`, `FS_CACHE_DIR`, `FS_CACHE_DEBUG`, etc.).
 
-MIT License
+## Testing
+
+```sh
+# copy the default config (adjust ports if needed)
+cp tests/dist-config.json tests/config.json
+
+pnpm test
+```
+
+## License
+
+MIT
